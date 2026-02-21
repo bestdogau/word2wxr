@@ -1,0 +1,118 @@
+name: Convert Word to WordPress XML
+
+# Runs when you push .docx files OR manually trigger it
+on:
+  push:
+    paths:
+      - 'input/posts/**'
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'AI Model'
+        required: false
+        default: 'deepseek/deepseek-v3.2'
+        type: choice
+        options:
+          - deepseek/deepseek-v3.2
+          - openai/gpt-4o-mini
+          - openai/gpt-4o
+      output_mode:
+        description: 'Output mode'
+        required: false
+        default: 'combined'
+        type: choice
+        options:
+          - combined
+          - separate
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 2 hour max
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install python-docx lxml requests
+
+      - name: Check for input files
+        id: check
+        run: |
+          # Find reference XML
+          REF_FILE=$(find references/ -name "*.xml" -type f | head -1)
+          if [ -z "$REF_FILE" ]; then
+            echo "❌ No reference XML found in references/ folder"
+            exit 1
+          fi
+          echo "ref_file=$REF_FILE" >> $GITHUB_OUTPUT
+          echo "✅ Reference XML: $REF_FILE"
+
+          # Count docx files
+          DOCX_COUNT=$(find input/posts/ -name "*.docx" -type f 2>/dev/null | wc -l)
+          if [ "$DOCX_COUNT" -eq 0 ]; then
+            echo "❌ No .docx files found in input/posts/ folder"
+            exit 1
+          fi
+          echo "docx_count=$DOCX_COUNT" >> $GITHUB_OUTPUT
+          echo "✅ Found $DOCX_COUNT Word file(s)"
+
+      - name: Run conversion
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          # Create config.json with the secret API key
+          echo '{"api_key": "'$OPENROUTER_API_KEY'"}' > config.json
+
+          # Determine model
+          MODEL="${{ github.event.inputs.model || 'deepseek/deepseek-v3.2' }}"
+          MODE="${{ github.event.inputs.output_mode || 'combined' }}"
+
+          echo "=============================="
+          echo "  Model: $MODEL"
+          echo "  Files: ${{ steps.check.outputs.docx_count }}"
+          echo "  Mode:  $MODE"
+          echo "=============================="
+
+          # Build command
+          CMD="python convert.py --ref ${{ steps.check.outputs.ref_file }} --input input/posts/ --output output --model $MODEL -v"
+
+          if [ "$MODE" = "separate" ]; then
+            CMD="$CMD --single-files"
+          fi
+
+          # Run it
+          $CMD
+
+          # Clean up API key
+          rm -f config.json
+
+      - name: Upload output XML
+        uses: actions/upload-artifact@v4
+        with:
+          name: wordpress-xml-import
+          path: output/*.xml
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          echo "## ✅ Conversion Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Files converted:** ${{ steps.check.outputs.docx_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Output files:**" >> $GITHUB_STEP_SUMMARY
+          for f in output/*.xml; do
+            SIZE=$(stat --format="%s" "$f")
+            echo "- \`$(basename $f)\` — $SIZE bytes" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📥 Download from the **Artifacts** section below." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next step:** WordPress Dashboard → Tools → Import → WordPress Importer" >> $GITHUB_STEP_SUMMARY
